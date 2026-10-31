@@ -1,6 +1,6 @@
-# Kunooz Al-Huqul Store
+# Knooz Store
 
-Arabic/English storefront for Kunooz Al-Huqul food products, featuring the Rashfa specialty coffee collection (Colombian, Ethiopian, Brazilian drip boxes) plus pantry essentials.
+Arabic/English storefront for Knooz food products, featuring the Rashfa specialty coffee collection (Colombian, Ethiopian, Brazilian drip boxes) plus pantry essentials.
 
 ## Local setup
 

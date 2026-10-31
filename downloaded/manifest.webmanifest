@@ -10,8 +10,8 @@
   "display": "standalone",
   "display_override": ["standalone", "minimal-ui", "browser"],
   "orientation": "any",
-  "background_color": "#f3eee5",
-  "theme_color": "#12100e",
+  "background_color": "#fff8ec",
+  "theme_color": "#fff8ec",
   "categories": ["shopping", "food", "business"],
   "prefer_related_applications": false,
   "icons": [
@@ -38,12 +38,6 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
-    },
-    {
-      "src": "/assets/kunuz-mark.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any"
     }
   ],
   "shortcuts": [

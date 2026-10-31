@@ -1,10 +1,12 @@
-/* Kunooz shell cache — APIs and checkout always hit the network. */
-const V = 'kunuz-v9';
+/* Knooz shell cache — APIs and checkout always hit the network. */
+const V = 'kunuz-v27';
 const SHELL = [
   '/',
   '/catalog.js?v=kunuz2',
   '/kunuz-catalog.js?v=kunuz2',
-  '/assets/kunuz-mark.svg',
+  '/assets/logo.png',
+  '/assets/logo@2x.png',
+  '/assets/mark.png',
   '/assets/icon-192.png',
   '/assets/icon-512.png',
   '/manifest.webmanifest'

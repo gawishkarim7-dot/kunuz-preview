@@ -6,6 +6,7 @@ const http = require('node:http');
 const path = require('node:path');
 const { URL } = require('node:url');
 const catalog = require('./catalog');
+const store = require('./store');
 const { ApiError, buildOrder, createOrderCredentials, safeEqualHex, validateQuote } = require('./commerce');
 const { closePool, getPool } = require('./db');
 
@@ -13,53 +14,73 @@ const ROOT = path.resolve(__dirname, '..');
 const MAX_JSON_BYTES = 16 * 1024 * 1024;
 const RATE_LIMITS = new Map();
 const RATE_LIMIT_SECRET = process.env.RATE_LIMIT_SECRET || crypto.randomBytes(32).toString('hex');
-const bankTransfer = {
-  name: process.env.BANK_NAME_AR || '',
-  nameEn: process.env.BANK_NAME_EN || '',
-  holder: process.env.BANK_ACCOUNT_NAME_AR || '',
-  holderEn: process.env.BANK_ACCOUNT_NAME_EN || '',
-  accountNumber: process.env.BANK_ACCOUNT_NUMBER || '',
-  iban: process.env.BANK_IBAN || '',
-  swift: process.env.BANK_SWIFT || '',
-  currency: process.env.BANK_CURRENCY || 'SAR',
-  branch: process.env.BANK_BRANCH_AR || '',
-  branchEn: process.env.BANK_BRANCH_EN || ''
-};
-const bankTransferConfigured = Boolean(
-  process.env.MANUAL_PAYMENT_ENABLED === 'true' &&
-  bankTransfer.name && bankTransfer.holder && bankTransfer.iban
-);
-const CHECKOUT_METHODS = Object.freeze({
-  mada: false,
-  card: false,
-  apple: false,
-  stc: false,
-  tabby: false,
-  tamara: false,
-  bank: bankTransferConfigured,
-  later: process.env.MANUAL_PAYMENT_ENABLED === 'true',
-  cod: process.env.COD_ENABLED === 'true'
-});
+// Online gateways (mada, cards, Apple Pay, STC Pay, Tabby, Tamara) are not integrated yet,
+// so only these methods can create an order in full checkout mode.
+const gateway = require('./gateway');
+
+const CHECKOUT_CAPABLE = ['bank', 'later', 'cod'];
+const GATEWAY_METHODS = ['mada', 'card', 'apple', 'stc'];
+const ORDER_STATUSES = ['awaiting_confirmation', 'pending_payment', 'awaiting_transfer', 'cod_confirmed', 'paid', 'deposit_paid', 'payment_failed', 'in_fabrication', 'shipped', 'delivered', 'cancelled'];
+
+function gatewayReady() {
+  const g = store.gatewayPublic();
+  return dbConfigured() && g.enabled && g.hasSecret;
+}
+
+function publicOrigin(req) {
+  const fixed = String(process.env.PUBLIC_URL || '').trim().replace(/\/+$/, '');
+  if (/^https?:\/\//.test(fixed)) return fixed;
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() || (req.socket && req.socket.encrypted ? 'https' : 'http');
+  return `${proto === 'https' ? 'https' : 'http'}://${req.headers.host || 'localhost'}`;
+}
+
+function callbackSig(orderNo) {
+  return crypto.createHmac('sha256', store.gatewaySecret() || 'none').update(`cb:${orderNo}`).digest('hex').slice(0, 32);
+}
+
+function dbConfigured() {
+  return Boolean(process.env.DATABASE_URL);
+}
+
+function bankInfo() {
+  const bank = store.get().payments.bank;
+  return bank.name && bank.holder && bank.iban ? { ...bank } : null;
+}
+
+function checkoutMethods() {
+  const { accepted } = store.get().payments;
+  const methods = Object.fromEntries(store.PAYMENT_KEYS.map(key => [key, false]));
+  for (const key of CHECKOUT_CAPABLE) {
+    methods[key] = accepted[key] === true && (key !== 'bank' || Boolean(bankInfo()));
+  }
+  for (const key of GATEWAY_METHODS) {
+    methods[key] = accepted[key] === true && gatewayReady();
+  }
+  return methods;
+}
 
 function checkoutEnabled() {
-  return process.env.CATALOG_APPROVED === 'true' &&
-    process.env.CHECKOUT_ENABLED === 'true' &&
-    Object.values(CHECKOUT_METHODS).some(Boolean);
+  return store.get().payments.checkoutEnabled === true &&
+    dbConfigured() &&
+    Object.values(checkoutMethods()).some(Boolean);
 }
 
 function config() {
   const enabled = checkoutEnabled();
-  const whatsapp = String(process.env.CONTACT_WHATSAPP || process.env.WHATSAPP_NUMBER || '').replace(/\D/g, '');
+  const pub = store.publicConfig();
+  const { accepted } = store.get().payments;
   return {
     checkoutEnabled: enabled,
     authEnabled: false,
-    methods: CHECKOUT_METHODS,
-    bank: enabled && bankTransferConfigured ? bankTransfer : null,
-    whatsapp,
-    seller: {
-      crNo: enabled ? process.env.SELLER_CR_NO || '' : '',
-      vatNo: enabled ? process.env.SELLER_VAT_NO || '' : ''
-    }
+    methods: checkoutMethods(),
+    accepted: pub.accepted,
+    bank: accepted.bank === true ? bankInfo() : null,
+    payNote: pub.payNote,
+    whatsapp: pub.whatsapp,
+    site: pub.site,
+    home: pub.home,
+    shipping: pub.shipping,
+    seller: pub.seller
   };
 }
 
@@ -77,6 +98,9 @@ function sendJson(res, status, value) {
 function errorResponse(res, error) {
   if (error instanceof ApiError) {
     return sendJson(res, error.status, { error: error.code });
+  }
+  if (error && error.code === 'validation_error') {
+    return sendJson(res, 400, { error: 'validation_error', message: error.message });
   }
   if (error && error.code === 'database_unconfigured') {
     return sendJson(res, 503, { error: 'service_unavailable' });
@@ -154,6 +178,11 @@ function staticCandidates(pathname) {
   if (decoded.includes('\0') || decoded.includes('\\')) return [];
 
   if (decoded === '/') return [path.join(ROOT, 'index.html')];
+  if (decoded === '/admin' || decoded === '/admin/') return [path.join(ROOT, 'admin.html')];
+  if (decoded.startsWith('/uploads/')) {
+    const file = safeFile(store.uploadsDir(), decoded.slice('/uploads/'.length));
+    return file ? [file] : [];
+  }
   if (['/catalog.js'].includes(decoded)) return [path.join(ROOT, 'assets', 'catalog.js')];
   if (decoded.startsWith('/img/')) {
     const file = safeFile(path.join(ROOT, 'downloaded', 'img'), decoded.slice('/img/'.length));
@@ -207,10 +236,14 @@ async function serveStatic(req, res, pathname) {
     }
     const isHtml = file.endsWith('.html');
     const isAppJs = file.endsWith('.js') && !file.includes(`${path.sep}node_modules${path.sep}`);
+    const isUpload = file.startsWith(store.uploadsDir() + path.sep);
     res.writeHead(200, {
       'Content-Type': contentType(file),
       'Content-Length': data.length,
-      'Cache-Control': isHtml || isAppJs ? 'no-cache' : 'public, max-age=3600',
+      ...(file.endsWith('admin.html') ? { 'X-Robots-Tag': 'noindex, nofollow' } : {}),
+      'Cache-Control': file.endsWith('admin.html') ? 'no-store' :
+        isUpload ? 'public, max-age=31536000, immutable' :
+        isHtml || isAppJs ? 'no-cache' : 'public, max-age=3600',
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'strict-origin-when-cross-origin',
       'X-Frame-Options': 'DENY'
@@ -253,21 +286,43 @@ async function createQuote(input) {
   }
 }
 
-async function createOrder(input) {
+async function createOrder(input, req) {
   if (!checkoutEnabled()) throw new ApiError(503, 'checkout_disabled');
-  const order = buildOrder(input, catalog);
-  if (!CHECKOUT_METHODS[order.paymentMethod]) throw new ApiError(503, 'payment_unavailable');
+  const order = buildOrder(input, catalog, store.get().shipping);
+  if (!checkoutMethods()[order.paymentMethod]) throw new ApiError(503, 'payment_unavailable');
 
   const credentials = createOrderCredentials();
+  const online = GATEWAY_METHODS.includes(order.paymentMethod);
+  let payment = null;
+  if (online) {
+    // Create the hosted payment page first; if the gateway is down no order is saved.
+    const origin = publicOrigin(req);
+    const no = encodeURIComponent(credentials.orderNo);
+    try {
+      const invoice = await gateway.createInvoice(store.gatewaySecret(), {
+        orderNo: credentials.orderNo,
+        amount: order.totals.dueNow,
+        description: `${store.get().site.nameEn || 'Order'} - ${credentials.orderNo}`,
+        successUrl: `${origin}/?order=${no}&t=${encodeURIComponent(credentials.token)}`,
+        backUrl: `${origin}/checkout`,
+        callbackUrl: `${origin}/api/webhooks/moyasar?order=${no}&k=${callbackSig(credentials.orderNo)}`
+      });
+      payment = { provider: 'moyasar', invoiceId: invoice.id, url: invoice.url, amount: invoice.amount };
+    } catch (error) {
+      console.error('Payment gateway error:', error.message);
+      throw new ApiError(502, 'payment_gateway_error');
+    }
+  }
+
   const pool = getPool();
   const client = await pool.connect();
   let orderId;
-  const status = order.paymentMethod === 'bank' ? 'awaiting_transfer' : 'awaiting_confirmation';
+  const status = online ? 'pending_payment' : order.paymentMethod === 'bank' ? 'awaiting_transfer' : 'awaiting_confirmation';
   try {
     await client.query('BEGIN');
     const result = await client.query(
-      `INSERT INTO orders (order_no, token_hash, locale, status, payment_method, shipping_method, customer, totals)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+      `INSERT INTO orders (order_no, token_hash, locale, status, payment_method, shipping_method, customer, totals, payment)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
       [
         credentials.orderNo,
         credentials.tokenHash,
@@ -276,7 +331,8 @@ async function createOrder(input) {
         order.paymentMethod,
         order.shippingMethod,
         order.customer,
-        order.totals
+        order.totals,
+        payment
       ]
     );
     orderId = result.rows[0].id;
@@ -311,6 +367,7 @@ async function createOrder(input) {
   return {
     orderNo: credentials.orderNo,
     token: credentials.token,
+    ...(payment ? { redirect: payment.url } : {}),
     order: {
       no: credentials.orderNo,
       token: credentials.token,
@@ -324,22 +381,56 @@ async function createOrder(input) {
         dueNow: order.totals.dueNow,
         hasCustom: order.totals.hasCustom
       },
-      bank: order.paymentMethod === 'bank' ? bankTransfer : null
+      bank: order.paymentMethod === 'bank' ? bankInfo() : null
     }
   };
+}
+
+// Asks Moyasar (never the customer's browser) whether a pending order was paid.
+async function verifyPayment(orderNo) {
+  const pool = getPool();
+  const found = await pool.query('SELECT status, payment, totals FROM orders WHERE order_no = $1', [orderNo]);
+  const row = found.rows[0];
+  if (!row) return null;
+  if (row.status !== 'pending_payment' || !row.payment || row.payment.provider !== 'moyasar') return row.status;
+  const secret = store.gatewaySecret();
+  if (!secret) return row.status;
+
+  let verdict;
+  try {
+    verdict = await gateway.checkInvoice(secret, {
+      invoiceId: row.payment.invoiceId,
+      amount: row.payment.amount,
+      orderNo
+    });
+  } catch (error) {
+    console.error(`Could not verify payment for ${orderNo}:`, error.message);
+    return row.status;
+  }
+  let next = row.status;
+  if (verdict === 'paid') next = Number(row.totals.dueNow) < Number(row.totals.total) ? 'deposit_paid' : 'paid';
+  else if (verdict === 'closed') next = 'payment_failed';
+  if (next !== row.status) {
+    await pool.query(
+      `UPDATE orders SET status = $2, updated_at = now() WHERE order_no = $1 AND status = 'pending_payment'`,
+      [orderNo, next]
+    );
+  }
+  return next;
 }
 
 async function getOrder(orderNo, token) {
   if (typeof token !== 'string' || token.length > 100) return null;
   const pool = getPool();
   const result = await pool.query(
-    `SELECT order_no, token_hash, locale, status, payment_method, shipping_method, customer, totals, created_at
+    `SELECT order_no, token_hash, locale, status, payment_method, shipping_method, customer, totals, payment, created_at
      FROM orders WHERE order_no = $1`,
     [orderNo]
   );
   const row = result.rows[0];
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
   if (!row || !safeEqualHex(row.token_hash.trim(), tokenHash)) return null;
+  if (row.status === 'pending_payment') row.status = await verifyPayment(orderNo);
 
   const lines = await pool.query(
     `SELECT product_id AS "productId", sku, title, product_type AS type, unit,
@@ -361,7 +452,8 @@ async function getOrder(orderNo, token) {
       en: line.title
     })),
     totals: row.totals,
-    bank: row.payment_method === 'bank' && bankTransferConfigured ? bankTransfer : null
+    bank: row.payment_method === 'bank' ? bankInfo() : null,
+    ...(row.status === 'pending_payment' && row.payment && row.payment.url ? { payUrl: row.payment.url } : {})
   };
 }
 
@@ -375,6 +467,155 @@ function pathOrderNo(pathname) {
   }
 }
 
+/* ---------- admin ---------- */
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  }
+  return out;
+}
+
+function isSecureRequest(req) {
+  return process.env.NODE_ENV === 'production' || req.headers['x-forwarded-proto'] === 'https';
+}
+
+function sessionCookie(req, value, maxAge) {
+  return `kz_admin=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${isSecureRequest(req) ? '; Secure' : ''}`;
+}
+
+// The admin panel is for the owner's own computer only. A request counts as
+// local when it comes straight from this machine's loopback address, was not
+// relayed by a proxy or tunnel (Render, Cloudflare, ngrok...) and was addressed
+// to localhost (which also blocks DNS-rebinding). Set ADMIN_ALLOW_REMOTE=true
+// to open it up on purpose.
+const FORWARD_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'forwarded', 'x-real-ip', 'cf-connecting-ip', 'cf-ray', 'true-client-ip', 'x-original-forwarded-for'];
+
+function isLocalRequest(req) {
+  if (process.env.ADMIN_ALLOW_REMOTE === 'true') return true;
+  const addr = String(req.socket && req.socket.remoteAddress || '');
+  if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(addr)) return false;
+  if (FORWARD_HEADERS.some(h => req.headers[h] !== undefined)) return false;
+  const host = String(req.headers.host || '').toLowerCase().replace(/:\d+$/, '');
+  return ['localhost', '127.0.0.1', '[::1]'].includes(host);
+}
+
+function isAdmin(req) {
+  return store.verifySession(parseCookies(req).kz_admin);
+}
+
+function adminData() {
+  const s = store.get();
+  return {
+    site: s.site,
+    home: s.home,
+    payments: s.payments,
+    shipping: s.shipping,
+    categories: s.categories,
+    products: s.products,
+    bundles: s.bundles,
+    username: store.adminUsername(),
+    gateway: store.gatewayPublic(),
+    env: { databaseConfigured: dbConfigured(), checkoutActive: checkoutEnabled(), gatewaysReady: gatewayReady(), publicUrl: /^https?:\/\//.test(String(process.env.PUBLIC_URL || '')) }
+  };
+}
+
+async function handleAdminApi(req, res, pathname) {
+  if (req.method === 'POST' && pathname === '/api/admin/login') {
+    rateLimit(req, 'admin-login', 8, 15 * 60 * 1000);
+    const input = await readJson(req);
+    if (!store.verifyLogin(input && input.username, input && input.password)) throw new ApiError(401, 'invalid_credentials');
+    const { token, maxAge } = store.signSession();
+    res.setHeader('Set-Cookie', sessionCookie(req, token, maxAge));
+    return sendJson(res, 200, { ok: true });
+  }
+  if (req.method === 'POST' && pathname === '/api/admin/logout') {
+    res.setHeader('Set-Cookie', sessionCookie(req, '', 0));
+    return sendJson(res, 200, { ok: true });
+  }
+  if (!isAdmin(req)) throw new ApiError(401, 'unauthorized');
+
+  if (req.method === 'GET' && pathname === '/api/admin/data') return sendJson(res, 200, adminData());
+
+  if (req.method === 'POST' && pathname === '/api/admin/upload') {
+    const input = await readJson(req);
+    return sendJson(res, 201, { url: store.saveUpload(input && input.data) });
+  }
+
+  if (req.method === 'POST' && pathname === '/api/admin/password') {
+    const input = await readJson(req);
+    store.changeCredentials(input && input.current, { username: input && input.username, next: input && input.next });
+    const { token, maxAge } = store.signSession();
+    res.setHeader('Set-Cookie', sessionCookie(req, token, maxAge));
+    return sendJson(res, 200, { ok: true });
+  }
+
+  if (req.method === 'PUT' && pathname === '/api/admin/gateway') {
+    const input = await readJson(req);
+    store.setGateway(input);
+    return sendJson(res, 200, adminData());
+  }
+
+  if (req.method === 'POST' && pathname === '/api/admin/gateway/test') {
+    const key = store.gatewaySecret();
+    if (!key) throw new ApiError(400, 'no_gateway_key');
+    try {
+      await gateway.ping(key);
+    } catch (error) {
+      return sendJson(res, 200, { ok: false, message: error.status === 401 ? 'المفتاح مرفوض من ميسر. تأكد أنه المفتاح السري الصحيح.' : 'تعذّر الوصول إلى ميسر الآن. حاول لاحقًا.' });
+    }
+    return sendJson(res, 200, { ok: true, mode: store.gatewayPublic().mode });
+  }
+
+  if (req.method === 'GET' && pathname === '/api/admin/orders') {
+    if (!dbConfigured()) return sendJson(res, 200, { configured: false, orders: [] });
+    const result = await getPool().query(
+      `SELECT o.order_no, o.status, o.payment_method, o.shipping_method, o.customer, o.totals, o.created_at,
+              (SELECT count(*) FROM order_items i WHERE i.order_id = o.id)::int AS items
+       FROM orders o ORDER BY o.created_at DESC LIMIT 200`
+    );
+    return sendJson(res, 200, {
+      configured: true,
+      orders: result.rows.map(r => ({
+        no: r.order_no,
+        status: r.status,
+        pay: r.payment_method,
+        ship: r.shipping_method,
+        name: r.customer && r.customer.name,
+        mobile: r.customer && r.customer.mobile,
+        city: r.customer && [r.customer.city, r.customer.district].filter(Boolean).join(' - '),
+        total: r.totals && r.totals.total,
+        dueNow: r.totals && r.totals.dueNow,
+        items: r.items,
+        at: r.created_at
+      }))
+    });
+  }
+
+  const statusMatch = pathname.match(/^\/api\/admin\/orders\/([^/]+)\/status$/);
+  if (req.method === 'PUT' && statusMatch) {
+    if (!dbConfigured()) throw new ApiError(400, 'database_required');
+    const input = await readJson(req);
+    if (!ORDER_STATUSES.includes(input && input.status)) throw new ApiError(400, 'invalid_status');
+    const done = await getPool().query(
+      'UPDATE orders SET status = $2, updated_at = now() WHERE order_no = $1 RETURNING order_no',
+      [decodeURIComponent(statusMatch[1]), input.status]
+    );
+    if (!done.rowCount) throw new ApiError(404, 'not_found');
+    return sendJson(res, 200, { ok: true });
+  }
+
+  const match = pathname.match(/^\/api\/admin\/([a-z]+)$/);
+  if (req.method === 'PUT' && match && store.SECTIONS.includes(match[1])) {
+    const input = await readJson(req);
+    store.update(match[1], input);
+    return sendJson(res, 200, adminData());
+  }
+  throw new ApiError(404, 'not_found');
+}
+
 async function handle(req, res) {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const { pathname } = url;
@@ -382,6 +623,45 @@ async function handle(req, res) {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('X-Frame-Options', 'DENY');
 
+  if (req.method === 'GET' && pathname === '/kunuz-catalog.js') {
+    const body = store.catalogJs();
+    res.writeHead(200, {
+      'Content-Type': 'text/javascript; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+      'Cache-Control': 'no-cache'
+    });
+    return res.end(body);
+  }
+  const isAdminPath = pathname === '/admin' || pathname === '/admin/' || pathname.startsWith('/api/admin/');
+  if (isAdminPath && !isLocalRequest(req)) {
+    res.setHeader('Cache-Control', 'no-store');
+    return sendJson(res, 404, { error: 'not_found' });
+  }
+
+  if (pathname.startsWith('/api/admin/')) {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      return await handleAdminApi(req, res, pathname);
+    } catch (error) {
+      return errorResponse(res, error);
+    }
+  }
+  if (req.method === 'POST' && pathname === '/api/webhooks/moyasar') {
+    req.resume(); // the body is ignored on purpose: we re-check with Moyasar ourselves
+    try {
+      rateLimit(req, 'webhook', 120, 60 * 1000);
+      const orderNo = url.searchParams.get('order') || '';
+      const given = url.searchParams.get('k') || '';
+      const expected = callbackSig(orderNo);
+      const ok = orderNo && given.length === expected.length &&
+        crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
+      if (!ok || !dbConfigured()) return sendJson(res, 403, { error: 'forbidden' });
+      const status = await verifyPayment(orderNo);
+      return sendJson(res, 200, { ok: true, status });
+    } catch (error) {
+      return errorResponse(res, error);
+    }
+  }
   if (req.method === 'GET' && pathname === '/api/config') return sendJson(res, 200, config());
   if (req.method === 'GET' && pathname === '/api/health') {
     try {
@@ -410,7 +690,7 @@ async function handle(req, res) {
     try {
       rateLimit(req, 'order', 8, 60 * 60 * 1000);
       const input = await readJson(req);
-      return sendJson(res, 201, await createOrder(input));
+      return sendJson(res, 201, await createOrder(input, req));
     } catch (error) {
       return errorResponse(res, error);
     }
@@ -443,7 +723,7 @@ function createServer() {
 if (require.main === module) {
   const server = createServer();
   const port = Number(process.env.PORT || 3026);
-  server.listen(port, () => console.log(`Kunooz store listening on port ${port}.`));
+  server.listen(port, () => console.log(`Knooz store listening on port ${port}.`));
 
   const shutdown = () => {
     server.close(async () => {

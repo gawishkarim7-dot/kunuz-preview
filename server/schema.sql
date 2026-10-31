@@ -55,3 +55,5 @@ CREATE TABLE IF NOT EXISTS quote_files (
   contents BYTEA NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment JSONB;

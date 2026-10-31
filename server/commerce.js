@@ -2,8 +2,8 @@
 
 const crypto = require('node:crypto');
 
-const SHIPPING = Object.freeze({ std: 25, exp: 45, ins: 150, pick: 0 });
-const ORDERABLE_PAYMENTS = new Set(['bank', 'later', 'cod']);
+const DEFAULT_SHIPPING = Object.freeze({ std: 25, exp: 45, ins: 150, freeOver: 500 });
+const ORDERABLE_PAYMENTS = new Set(['bank', 'later', 'cod', 'mada', 'card', 'apple', 'stc']);
 
 class ApiError extends Error {
   constructor(status, code) {
@@ -106,7 +106,8 @@ function validateConfiguration(product, raw, submittedQty) {
   return { quantity, cfg: safeCfg };
 }
 
-function buildOrder(input, catalog) {
+function buildOrder(input, catalog, shippingConfig = DEFAULT_SHIPPING) {
+  const SHIPPING = { std: shippingConfig.std, exp: shippingConfig.exp, ins: shippingConfig.ins, pick: 0 };
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail(400, 'invalid_order');
   if (input.terms !== true) fail(400, 'terms_required');
   if (!['ar', 'en'].includes(input.lang)) fail(400, 'invalid_language');
@@ -147,7 +148,7 @@ function buildOrder(input, catalog) {
   });
 
   const subtotal = roundMoney(lines.reduce((sum, line) => sum + line.total, 0));
-  const shipping = input.ship === 'std' && subtotal >= 500 ? 0 : SHIPPING[input.ship];
+  const shipping = input.ship === 'std' && shippingConfig.freeOver > 0 && subtotal >= shippingConfig.freeOver ? 0 : SHIPPING[input.ship];
   const total = roundMoney(subtotal + shipping);
   const customTotal = roundMoney(lines.reduce(
     (sum, line) => sum + (line.type === 'custom' ? line.total : 0), 0

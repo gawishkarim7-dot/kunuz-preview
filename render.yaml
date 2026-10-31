@@ -15,3 +15,19 @@ services:
         value: "false"
       - key: CONTACT_WHATSAPP
         sync: false
+      # First-run admin password for /admin (change it from inside the panel).
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Admin edits and uploaded images live here. The free plan has no
+      # persistent disk, so on a paid plan attach a disk and point DATA_DIR at it.
+      - key: DATA_DIR
+        value: ./data
+      # Public address of the live site (customers return here after paying).
+      - key: PUBLIC_URL
+        sync: false
+      # Needed for in-site checkout, online payment and the orders tab.
+      - key: DATABASE_URL
+        sync: false
+      # Optional: set the Moyasar secret key here instead of the admin panel.
+      - key: MOYASAR_SECRET_KEY
+        sync: false

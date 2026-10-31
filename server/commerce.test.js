@@ -1,5 +1,6 @@
 'use strict';
 
+process.env.DATA_DIR = require('node:path').join(require('node:os').tmpdir(), `kunuz-test-${process.pid}`);
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const catalog = require('./catalog');
@@ -44,9 +45,11 @@ test('rejects quote-only products and untrusted payment methods', () => {
     error => error instanceof ApiError && error.code === 'invalid_product'
   );
   assert.throws(
-    () => buildOrder(validOrder({ pay: 'mada' }), catalog),
+    () => buildOrder(validOrder({ pay: 'tabby' }), catalog),
     error => error instanceof ApiError && error.code === 'payment_unavailable'
   );
+  // Online methods are orderable here; app.js only offers them when the gateway is linked and enabled.
+  assert.equal(buildOrder(validOrder({ pay: 'mada' }), catalog).paymentMethod, 'mada');
 });
 
 test('accepts bank transfer as a manual payment method', () => {
