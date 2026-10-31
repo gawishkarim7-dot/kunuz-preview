@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: kunuz-preview
+    runtime: node
+    plan: free
+    buildCommand: npm install --omit=dev
+    startCommand: node server/app.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: CHECKOUT_ENABLED
+        value: "false"
+      - key: CATALOG_APPROVED
+        value: "false"
+      - key: CONTACT_WHATSAPP
+        sync: false

@@ -1,0 +1,17 @@
+{
+  "name": "smartline-store",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server/app.js",
+    "db:migrate": "node --env-file-if-exists=.env server/migrate.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "pg": "^8.16.3"
+  }
+}

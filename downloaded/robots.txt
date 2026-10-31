@@ -1,0 +1,11 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /admin
+Disallow: /pay/
+Disallow: /webhooks/
+Disallow: /s/
+Disallow: /checkout
+Disallow: /account
+
+Sitemap: https://smartlinesa.store/sitemap.xml
