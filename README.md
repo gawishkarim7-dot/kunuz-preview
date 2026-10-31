@@ -1,3 +1,13 @@
+---
+title: Knooz
+emoji: 🍊
+colorFrom: yellow
+colorTo: gray
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Knooz Store
 
 Arabic/English storefront for Knooz food products, featuring the Rashfa specialty coffee collection (Colombian, Ethiopian, Brazilian drip boxes) plus pantry essentials.
